@@ -14,28 +14,46 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <stdexcept>
 
-// Script Hook V public ABI. Resolved at runtime: no redistributed SDK/runtime.
+// Match the official SDK's C++ declarations exactly. Import linkage makes Windows
+// load ScriptHookV.dll before DllMain, independent of ASI enumeration order.
+__declspec(dllimport) void nativeInit(unsigned __int64 hash);
+__declspec(dllimport) void nativePush64(unsigned __int64 value);
+__declspec(dllimport) unsigned __int64* nativeCall();
+__declspec(dllimport) void scriptWait(DWORD milliseconds);
+__declspec(dllimport) void scriptRegister(HMODULE module, void(*entry)());
+__declspec(dllimport) void scriptUnregister(HMODULE module);
+__declspec(dllimport) int worldGetAllVehicles(int* handles, int capacity);
+using KeyboardHandler = void(*)(DWORD, WORD, BYTE, BOOL, BOOL, BOOL, BOOL);
+__declspec(dllimport) void keyboardHandlerRegister(KeyboardHandler handler);
+__declspec(dllimport) void keyboardHandlerUnregister(KeyboardHandler handler);
+
+HMODULE selfModule{};
+volatile LONG pendingToggle=0;
+wchar_t logPath[MAX_PATH]{};
+void logLine(const char* text) {
+ if(!*logPath)return;
+ HANDLE file=CreateFileW(logPath,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+ if(file==INVALID_HANDLE_VALUE)return;
+ DWORD written;WriteFile(file,text,static_cast<DWORD>(std::strlen(text)),&written,nullptr);
+ WriteFile(file,"\r\n",2,&written,nullptr);CloseHandle(file);
+}
+void onKeyboard(DWORD key,WORD,BYTE,BOOL,BOOL,BOOL wasDown,BOOL isUp) {
+ if(key=='K'&&!wasDown&&!isUp)InterlockedExchange(&pendingToggle,1);
+}
+
+// Script Hook V public ABI. The runtime/SDK binaries are not redistributed.
 using U64 = std::uint64_t;
 using Handle = int;
 struct Vec { float x{}, y{}, z{}; };
 struct NativeVec { float x; int px; float y; int py; float z; int pz; };
 namespace Hook {
  using Init = void(*)(U64); using Push = void(*)(U64); using Call = U64*(*)();
- Init init{}; Push push{}; Call call{};
- void(*wait)(DWORD){}; void(*reg)(HMODULE, void(*)()){};
- void(*unreg)(HMODULE){}; int(*vehicles)(int*, int){};
- bool load() {
-  auto h = GetModuleHandleW(L"ScriptHookV.dll"); if (!h) return false;
-  init = reinterpret_cast<Init>(GetProcAddress(h,"nativeInit"));
-  push = reinterpret_cast<Push>(GetProcAddress(h,"nativePush64"));
-  call = reinterpret_cast<Call>(GetProcAddress(h,"nativeCall"));
-  wait = reinterpret_cast<decltype(wait)>(GetProcAddress(h,"scriptWait"));
-  reg = reinterpret_cast<decltype(reg)>(GetProcAddress(h,"scriptRegister"));
-  unreg = reinterpret_cast<decltype(unreg)>(GetProcAddress(h,"scriptUnregister"));
-  vehicles = reinterpret_cast<decltype(vehicles)>(GetProcAddress(h,"worldGetAllVehicles"));
-  return init && push && call && wait && reg && unreg && vehicles;
- }
+ Init init=&nativeInit; Push push=&nativePush64; Call call=&nativeCall;
+ auto wait=&scriptWait; auto reg=&scriptRegister;
+ auto unreg=static_cast<void(*)(HMODULE)>(&scriptUnregister);
+ auto vehicles=&worldGetAllVehicles;
  template<class T> U64 arg(T v) {
   U64 n = 0;
   if constexpr(std::is_pointer_v<T>) n = reinterpret_cast<U64>(v);
@@ -145,7 +163,7 @@ void poll(){lastKeys=keys;for(int i=0;i<256;i++)keys[i]=(GetAsyncKeyState(i)&0x8
 std::string input(std::string initial) {
  invoke(N::keyboard,0,"FMMC_KEY_TIP8","",initial.c_str(),"","","",48);
  int state;while((state=invoke<int>(N::keyboardState))==0)Hook::wait(0);
- poll();lastKeys=keys;
+ poll();lastKeys=keys;InterlockedExchange(&pendingToggle,0);
  if(state==1){auto s=invoke<const char*>(N::keyboardResult);if(s&&*s)return s;}return initial;
 }
 struct Row {std::string label;std::function<void(int)> action;};std::vector<Row> rows;
@@ -217,9 +235,14 @@ void tickSpawners(ULONGLONG now,const std::vector<int>& vv){for(auto& s:spawners
  int ped=invoke<int>(N::createDriver,car,26,pedModel,-1,true,false);
  if(!exists(ped)||!assign(car,s.path)){if(exists(ped))invoke(N::deleteEntity,&ped);invoke(N::deleteEntity,&car);}else{s.spawned.push_back(car);s.next=now+static_cast<ULONGLONG>(s.interval*1000);}invoke(N::releaseModel,hash);invoke(N::releaseModel,pedModel);
 }}
-void scriptMain(){
- wchar_t modulePath[MAX_PATH];GetModuleFileNameW(GetModuleHandleW(L"TrafficDirector.asi"),modulePath,MAX_PATH);folder=std::filesystem::path(modulePath).parent_path()/"TrafficDirector";std::filesystem::create_directories(folder);load();
- ULONGLONG nextTick=0,nextRoads=0;while(true){poll();if(hit('K'))menu=!menu;if(menu)drawMenu();worldPreview();auto now=GetTickCount64();if(now<messageUntil)text(0.40f,0.86f,message);
+void scriptLoop(){
+ logLine("Script fiber started (0.1.1)");
+ wchar_t modulePath[MAX_PATH]{};if(!GetModuleFileNameW(selfModule,modulePath,MAX_PATH))throw std::runtime_error("Cannot determine ASI path");
+ folder=std::filesystem::path(modulePath).parent_path()/"TrafficDirector";
+ std::error_code ec;std::filesystem::create_directories(folder,ec);
+ if(ec)logLine("WARNING: scene directory unavailable; menu remains enabled");else load();
+ logLine("Initialization complete. Press K to open menu.");notify("Traffic Director 0.1.1 loaded - Press K");
+ ULONGLONG nextTick=0,nextRoads=0;while(true){poll();if(InterlockedExchange(&pendingToggle,0)){menu=!menu;logLine(menu?"K received: menu opened":"K received: menu closed");}if(menu)drawMenu();worldPreview();auto now=GetTickCount64();if(now<messageUntil)text(0.40f,0.86f,message);
  if(now>=nextRoads){refreshZones();nextRoads=now+2000;}
  if(now>=nextTick){nextTick=now+100;std::array<int,4096> buffer{};int n=Hook::vehicles(buffer.data(),static_cast<int>(buffer.size()));n=std::clamp(n,0,static_cast<int>(buffer.size()));std::vector<int> vv(buffer.begin(),buffer.begin()+n);
  for(int v:vv){if(!exists(v)||playerVehicle(v)||controlled(v)||ownSpawn(v)||invoke<bool>(N::mission,v))continue;int ped=invoke<int>(N::driver,v,-1,false);if(exists(ped)&&(invoke<bool>(N::isPlayer,ped)||invoke<bool>(N::mission,ped)))continue;Vec at=pos(v);
@@ -229,6 +252,22 @@ void scriptMain(){
  Hook::wait(0);
  }
 }
-BOOL APIENTRY DllMain(HMODULE module,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(module);if(!Hook::load())return FALSE;Hook::reg(module,scriptMain);}else if(reason==DLL_PROCESS_DETACH&&Hook::unreg)Hook::unreg(module);return TRUE;}
+void scriptMain(){
+ try {scriptLoop();}
+ catch(const std::exception& e){logLine("Script stopped with C++ exception:");logLine(e.what());}
+ catch(...){logLine("Script stopped with unknown C++ exception");}
+}
+BOOL APIENTRY DllMain(HMODULE module,DWORD reason,LPVOID){
+ if(reason==DLL_PROCESS_ATTACH){
+  selfModule=module;DisableThreadLibraryCalls(module);
+  if(GetModuleFileNameW(module,logPath,MAX_PATH)){
+   wchar_t* slash=wcsrchr(logPath,L'\\');if(slash&&static_cast<size_t>(slash-logPath)+21<MAX_PATH)wcscpy_s(slash+1,MAX_PATH-static_cast<size_t>(slash+1-logPath),L"TrafficDirector.log");else logPath[0]=0;
+  }
+  logLine("ASI attached (0.1.1). Official Script Hook V imports linked.");
+  Hook::reg(module,scriptMain);keyboardHandlerRegister(onKeyboard);
+  logLine("Script and keyboard handler registered.");
+ }else if(reason==DLL_PROCESS_DETACH){keyboardHandlerUnregister(onKeyboard);Hook::unreg(module);}
+ return TRUE;
+}
 
 

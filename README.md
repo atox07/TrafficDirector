@@ -1,4 +1,4 @@
-# Traffic Director 0.1
+# Traffic Director 0.1.1
 
 C++ GTA V Story Mode ASI mod. English in-game menu. Requires Script Hook V and an ASI loader. No RAGE Plugin Hook, LSPDFR, ScriptHookVDotNet or menu DLL is required.
 
@@ -13,7 +13,7 @@ This is an initial implementation. It has not been compiled or tested in GTA V i
 
 The workflow has only `workflow_dispatch`: pushing commits, creating pull requests and uploading files do not launch builds. The workflow must be on the default branch before GitHub shows its Run workflow button. If uploading through a web interface omits `.github`, add `.github/workflows/build.yml` manually with GitHub's Create new file.
 
-The build uses Windows x64, CMake, C++17 and MSVC. It does not download third-party SDKs. The small Script Hook V public ABI bridge resolves runtime exports from the installed `ScriptHookV.dll`.
+The build uses Windows x64, CMake, C++17 and MSVC. It does not download third-party SDKs. MSVC generates an import library from `src/shv_imports.def`, which lists the official decorated C++ export names. Windows loads `ScriptHookV.dll` as a normal dependency before initializing the ASI. The workflow also checks all nine imports in the resulting ASI using dumpbin and includes `imports.txt` in the artifact.
 
 Local alternative in a Visual Studio x64 developer terminal:
 
@@ -26,9 +26,24 @@ cmake --build build --config Release
 
 1. Install the official Script Hook V runtime for your game build and its ASI loader (`dinput8.dll`): https://www.dev-c.enbdev.com/gtav/scripthookv/
 2. Copy `TrafficDirector.asi` beside `GTA5.exe` (the main game directory).
-3. Start Story Mode and press **K**.
+3. Start Story Mode. The message **Traffic Director 0.1.1 loaded - Press K** should appear. Press **K** to open the menu.
 
 The mod creates `TrafficDirector/TrafficDirector.dat` beside the ASI when you save. Keep the ASI filename unchanged. The runtime/loader are not included in this source package.
+
+## 0.1.1 loading fix / diagnostics
+
+Version 0.1 incorrectly looked up plain export names such as `nativeInit` with GetProcAddress. The official runtime exports MSVC C++ names such as `?nativeInit@@YAX_K@Z`, so the old initializer could return FALSE before registering the script. Version 0.1.1 uses normal DLL imports with the correct names and an explicit runtime dependency, removing the dynamic lookup and ASI load-order assumption.
+
+K now uses Script Hook V's keyboard callback, ignores key-repeat and forwards the toggle to the script fiber. Other menu navigation retains polling. The ASI records initialization and each K toggle in **TrafficDirector.log** beside the ASI. No world natives run in the keyboard callback or DllMain.
+
+If the menu still does not appear:
+
+- No `TrafficDirector.log`: inspect `asiloader.log` and `ScriptHookV.log`; Windows/ASI loader did not initialize the plugin, the game directory is wrong, or the folder cannot be written.
+- `ASI attached` but no `Script fiber started`: script registration did not progress; check `ScriptHookV.log` for runtime/game compatibility.
+- `Initialization complete` but no `K received`: the game is not receiving the registered keyboard event, or another plugin is interfering.
+- `K received: menu opened` but no menu: input works; investigate native drawing/runtime rather than the key binding.
+
+This source correction is verified against published Script Hook V declarations/import names. It still requires a successful GitHub build and an in-game test; no local game execution or C++ build was available during authoring.
 
 ## Controls
 

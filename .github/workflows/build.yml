@@ -12,12 +12,28 @@ jobs:
         run: cmake -S . -B build -A x64
       - name: Build
         run: cmake --build build --config Release
+      - name: Verify Script Hook V imports
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $dumpbin = & $vswhere -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found' }
+          $imports = (& $dumpbin /imports build/Release/TrafficDirector.asi) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect ASI imports' }
+          $imports | Set-Content build/imports.txt
+          if (-not $imports.Contains('ScriptHookV.dll')) { throw 'Missing ScriptHookV.dll dependency' }
+          Get-Content src/shv_imports.def | Where-Object { $_.Trim().StartsWith('?') } | ForEach-Object {
+            $symbol = $_.Trim()
+            if (-not $imports.Contains($symbol)) { throw "Missing import: $symbol" }
+          }
+          Write-Host 'All nine official Script Hook V imports verified.'
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item build/Release/TrafficDirector.asi dist/
           Copy-Item README.md dist/
+          Copy-Item build/imports.txt dist/
       - uses: actions/upload-artifact@v4
         with:
           name: TrafficDirector-Windows-x64
